@@ -8,7 +8,7 @@ import sys
 # ==========================================
 # الإعدادات
 # ==========================================
-ESP32_PORT = '/dev/tty.usbserial-0001'  # تأكد إن ده البورت بتاعك
+ESP32_PORT = '/dev/cu.usbserial-0001'  # تأكد إن ده البورت بتاعك
 BAUD_RATE = 115200
 
 try:
@@ -21,9 +21,9 @@ except Exception as e:
 # ==========================================
 # إعدادات الجراف
 # ==========================================
-WINDOW_SIZE = 512 
+WINDOW_SIZE = 1024
 y_data = deque([0] * WINDOW_SIZE, maxlen=WINDOW_SIZE)
-x_data = np.linspace(0, 1, WINDOW_SIZE)
+x_data = np.linspace(0, 2, WINDOW_SIZE)
 
 fig, ax = plt.subplots(figsize=(10, 5))
 fig.canvas.manager.set_window_title('MindWave Live Raw Data')
@@ -31,7 +31,7 @@ line, = ax.plot(x_data, y_data, color='#00ff00', linewidth=1)
 
 # تنسيق الشاشة عشان تستوعب الـ 1000 بتاعتك
 ax.set_ylim(-1000, 2000) 
-ax.set_xlim(0, 1)
+ax.set_xlim(0, 2)
 ax.set_facecolor('black')
 fig.patch.set_facecolor('#222222')
 ax.tick_params(colors='white')
@@ -42,7 +42,8 @@ LOWER_THRESH = 450
 ax.axhline(y=UPPER_THRESH, color='red', linestyle='--', label=f'Upper ({UPPER_THRESH})')
 ax.axhline(y=LOWER_THRESH, color='blue', linestyle='--', label=f'Lower ({LOWER_THRESH})')
 ax.legend(loc='upper right')
-
+ax.set_xlabel('Time (Seconds)', color='white')
+ax.set_ylabel('Raw EEG (Amplitude)', color='white')
 # ==========================================
 # دورة التحديث
 # ==========================================
