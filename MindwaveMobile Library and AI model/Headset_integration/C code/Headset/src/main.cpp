@@ -1,9 +1,8 @@
 /*
- * BCI Wheelchair Master Controller — Brainwave + WiFi UDP Edition
+ * BCI Wheelchair Master Controller — Dual Core + RF Burst Coexistence
  * ─────────────────────────────────────────────────────────────
- * Device  : ESP32
- * Features: Sichiray Headset (BT), Config Portal (AP), Fixed IP,
- * BTS7960 Motors, MPU6050 Gyro, NewPing Obstacle Avoidance
+ * Core 0: WiFi, Config Portal (AP), UDP
+ * Core 1: BT Headset, Motors, Ultrasonic, MPU6050
  */
 
 #include <Arduino.h>
@@ -25,53 +24,51 @@
 #include "BlinkProcessor.h"
 #include "MovementLogic.h"
 
-// ── WiFi Config portal ────────────────────────────────────────────
+// ── Shared Variables & Mutexes ──
+SemaphoreHandle_t sysMutex;
+SemaphoreHandle_t rfMutex;
+
+volatile char currentCommand = 's';
+volatile bool isExecutingCommand = false;
+volatile bool obstacleDetected = false;
+volatile bool configMode = false;
+
+// ── WiFi & UDP Variables ──
 const char *AP_SSID = "Wheelchair_Setup";
-const char *AP_PASSWORD = "12345678"; // min 8 chars
-const uint8_t CONFIG_BTN = 0;         // BOOT button = GPIO 0
-const uint32_t HOLD_MS = 2000;        // hold 2 s to enter config
+const char *AP_PASSWORD = "12345678";
+const uint8_t CONFIG_BTN = 0;
+const uint32_t HOLD_MS = 2000;
 
 Preferences prefs;
 WebServer server(80);
 String wifiSSID = "";
 String wifiPassword = "";
-bool configMode = false;
 
-// ── Fixed IP Variables ────────────────────────────────────────────
-const uint8_t DEVICE_LAST_OCTET = 57; // The fixed IP ending you want (e.g., .57)
-IPAddress staticIP;
-IPAddress gateway;
-IPAddress subnet;
-IPAddress dns;
-
-// ── UDP ───────────────────────────────────────────────────────────
+const uint8_t DEVICE_LAST_OCTET = 57;
+IPAddress staticIP, gateway, subnet, dns;
 const uint16_t UDP_PORT = 8007;
 const uint16_t UDP_REPLY_PORT = 9000;
 WiFiUDP udp;
 char udpPacket[32];
 
-// ── Motors (BTS7960) ──────────────────────────────────────────────
+// ── Hardware Globals (Motors, Sonar, Gyro) ──
 const uint8_t EN1 = 33, L_PWM1 = 25, R_PWM1 = 26;
 const uint8_t EN2 = 27, L_PWM2 = 14, R_PWM2 = 12;
 BTS7960 motorController1(EN1, L_PWM1, R_PWM1);
 BTS7960 motorController2(EN2, L_PWM2, R_PWM2);
 
-// ── Ultrasonic (NewPing) ──────────────────────────────────────────
 const uint8_t TRIG_LEFT = 19, ECHO_LEFT = 18;
 const uint8_t TRIG_RIGHT = 5, ECHO_RIGHT = 17;
 const int MAX_DISTANCE = 200;
-
 NewPing sonarLeft(TRIG_LEFT, ECHO_LEFT, MAX_DISTANCE);
 NewPing sonarRight(TRIG_RIGHT, ECHO_RIGHT, MAX_DISTANCE);
 
-volatile double distLeft = 999.0;
-volatile double distRight = 999.0;
+volatile double distLeft = 999.0, distRight = 999.0;
 bool readLeftNext = true;
 const int SAFE_DISTANCE = 100;
 const int SENSOR_READ_INTERVAL = 60;
 unsigned long lastSensorRead = 0;
 
-// ── Speed & Gyroscope ─────────────────────────────────────────────
 const int SPEED_MIN = 50;
 const int SPEED_MAX = 200;
 const int SPEED_DEFAULT = 50;
@@ -86,45 +83,25 @@ unsigned long lastAccelTime = 0;
 
 const float GYRO_NOISE_THRESHOLD = 0.01f;
 const int CALIBRATION_SAMPLES = 500;
-float Kp = 3.5f;
-float targetYaw = 0.0f;
-float currentYaw = 0.0f;
-float gyroBiasZ = 0.0f;
+float Kp = 3.5f, targetYaw = 0.0f, currentYaw = 0.0f, gyroBiasZ = 0.0f;
 unsigned long lastGyroTime = 0;
 Adafruit_MPU6050 mpu;
 
-// ── State Tracking ────────────────────────────────────────────────
-char currentCommand = 's';
-bool obstacleDetected = false;
-char pendingCommand = 0;
-bool inTransition = false;
-unsigned long transitionStart = 0;
-const int TRANSITION_MS = 300;
-unsigned long lastWifiCheck = 0;
-const int WIFI_CHECK_MS = 3000;
-const unsigned long SERIAL_PRINT_INTERVAL = 200;
-unsigned long lastSerialPrint = 0;
-
-// ── BCI HEADSET GLOBALS ───────────────────────────────────────────
-// WARNING: Replace with your actual Sichiray Headset MAC Address!
+// ── BCI HEADSET GLOBALS ──
 uint8_t HEADSET_MAC[6] = {0x00, 0xBA, 0x55, 0x81, 0xE2, 0xCC};
-
 BTManager btManager;
 AutoConnector autoConnector(&btManager, HEADSET_MAC);
 SignalReader signalReader;
 BlinkProcessor blinkProcessor;
 MovementLogic movementLogic;
 
-const int PIN_BT_STATUS = 15;    // Adjust pins to avoid conflict with motors
-const int PIN_SIGNAL_STATUS = 4; // Solid when signal is poor (0 = off)
-const int PIN_MENU_ACTIVE = 2;   // Menu timeout LED
-
+const int PIN_BT_STATUS = 15;
+const int PIN_SIGNAL_STATUS = 4;
+const int PIN_MENU_ACTIVE = 2;
 uint8_t pendingBlinks = 0;
-bool isExecutingCommand = false; // The "Lock-In" flag
-SystemState lastState = STATE_NEUTRAL;
 
 // ═══════════════════════════════════════════════════════════════════
-//  WIFI CONFIG PORTAL HTML (Kept Exactly As Is)
+//  WIFI CONFIG PORTAL HTML
 // ═══════════════════════════════════════════════════════════════════
 const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
@@ -170,10 +147,6 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
-// ═══════════════════════════════════════════════════════════════════
-//  PORTAL HANDLERS
-// ═══════════════════════════════════════════════════════════════════
-
 void handleRoot()
 {
   String page = String(CONFIG_HTML);
@@ -208,9 +181,9 @@ void handleSave()
   prefs.putString("password", newPass);
   prefs.end();
 
-  Serial.printf("Saved SSID: %s\n", newSSID.c_str());
+  Serial.printf("[PORTAL] Saved SSID: %s\n", newSSID.c_str());
   String page = String(CONFIG_HTML);
-  page.replace("%STATUS%", "<div class='status ok'>✅ Saved! Connecting to <b>" + newSSID + "</b>...<br>Reconnect your phone to the main network.</div>");
+  page.replace("%STATUS%", "<div class='status ok'>✅ Saved! Connecting to <b>" + newSSID + "</b>...</div>");
   page.replace("%SSID%", newSSID);
   server.send(200, "text/html", page);
   delay(2000);
@@ -223,17 +196,32 @@ void handleNotFound()
   server.send(302, "text/plain", "");
 }
 
-// STOP MOTORS DECLARATION FOR CONFIG PORTAL
-void stopMotors();
+// ═══════════════════════════════════════════════════════════════════
+//  HARDWARE & MOVEMENT FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════
+void stopMotors()
+{
+  motorController1.Stop();
+  motorController2.Stop();
+  motorController1.Disable();
+  motorController2.Disable();
+  obstacleDetected = false;
+  currentForwardSpeed = userSpeed;
+}
 
 void startConfigPortal()
 {
   configMode = true;
-  stopMotors();
+  xSemaphoreTake(sysMutex, portMAX_DELAY);
+  currentCommand = 's';
+  isExecutingCommand = false;
+  xSemaphoreGive(sysMutex);
+
   Serial.println("\n=== CONFIG PORTAL ACTIVE ===");
   WiFi.disconnect(true);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWORD);
+
   IPAddress apIP = WiFi.softAPIP();
   Serial.printf("AP IP: %s\n", apIP.toString().c_str());
   Serial.printf("Connect to WiFi: \"%s\"  pass: %s\n", AP_SSID, AP_PASSWORD);
@@ -244,38 +232,13 @@ void startConfigPortal()
   server.begin();
 
   unsigned long start = millis();
-  const unsigned long PORTAL_TIMEOUT = 5UL * 60UL * 1000UL;
-  Serial.println("Waiting for configuration (5 min timeout)...");
-  while (millis() - start < PORTAL_TIMEOUT)
+  while (millis() - start < 5UL * 60UL * 1000UL)
   {
     esp_task_wdt_reset();
     server.handleClient();
   }
   Serial.println("Config portal timeout — rebooting.");
   ESP.restart();
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  MOTOR / GYRO FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════
-
-void sendUdpReply(const char *msg)
-{
-  udp.beginPacket(udp.remoteIP(), UDP_REPLY_PORT);
-  udp.print(msg);
-  udp.endPacket();
-}
-
-void stopMotors()
-{
-  motorController1.Stop();
-  motorController2.Stop();
-  vTaskDelay(50 / portTICK_PERIOD_MS);
-  motorController1.Disable();
-  motorController2.Disable();
-  currentCommand = 's';
-  obstacleDetected = false;
-  currentForwardSpeed = userSpeed;
 }
 
 void resetHeading()
@@ -294,7 +257,6 @@ void calibrateGyro()
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
     sum += -g.gyro.z;
-    esp_task_wdt_reset();
     delay(2);
     if (i % 100 == 0)
       Serial.print('.');
@@ -315,178 +277,64 @@ void updateYaw()
     currentYaw += gz * dt * (180.0f / PI);
 }
 
-void forwardWithCorrection()
-{
-  updateYaw();
-  int speedCeiling = min(userSpeed + 20, SPEED_MAX);
-  if (millis() - lastAccelTime >= ACCEL_DELAY_MS)
-  {
-    if (currentForwardSpeed < speedCeiling)
-      currentForwardSpeed += ACCEL_STEP;
-    lastAccelTime = millis();
-  }
-  float error = targetYaw - currentYaw;
-  int correction = constrain((int)(Kp * error), -MAX_CORRECTION, MAX_CORRECTION);
-  int speedLeft = constrain(currentForwardSpeed - correction, 0, SPEED_MAX);
-  int speedRight = constrain(currentForwardSpeed + correction, 0, SPEED_MAX);
-  motorController1.Enable();
-  motorController2.Enable();
-  motorController1.TurnRight(speedLeft);
-  motorController2.TurnRight(speedRight);
-}
-
-void backwardWithCorrection()
-{
-  updateYaw();
-  float error = targetYaw - currentYaw;
-  int correction = constrain((int)(Kp * error), -MAX_CORRECTION, MAX_CORRECTION);
-  int speedLeft = constrain(BACKWARD_SPEED + correction, 0, SPEED_MAX);
-  int speedRight = constrain(BACKWARD_SPEED - correction, 0, SPEED_MAX);
-  motorController1.Enable();
-  motorController2.Enable();
-  motorController1.TurnLeft(speedLeft);
-  motorController2.TurnLeft(speedRight);
-}
-
 void executeMovement()
 {
-  if (inTransition)
-    return;
-  switch (currentCommand)
+  char cmdCopy;
+  xSemaphoreTake(sysMutex, portMAX_DELAY);
+  cmdCopy = currentCommand;
+  xSemaphoreGive(sysMutex);
+
+  if (cmdCopy == 's')
   {
-  case 'F':
-    forwardWithCorrection();
-    break;
-  case 'B':
-    backwardWithCorrection();
-    break;
-  case 'R':
+    stopMotors();
+    return;
+  }
+
+  updateYaw();
+  if (cmdCopy == 'F')
+  {
+    if (millis() - lastAccelTime >= ACCEL_DELAY_MS)
+    {
+      if (currentForwardSpeed < SPEED_MAX)
+        currentForwardSpeed += ACCEL_STEP;
+      lastAccelTime = millis();
+    }
+    float error = targetYaw - currentYaw;
+    int correction = constrain((int)(Kp * error), -MAX_CORRECTION, MAX_CORRECTION);
+    int speedLeft = constrain(currentForwardSpeed - correction, 0, SPEED_MAX);
+    int speedRight = constrain(currentForwardSpeed + correction, 0, SPEED_MAX);
+    motorController1.Enable();
+    motorController2.Enable();
+    motorController1.TurnRight(speedLeft);
+    motorController2.TurnRight(speedRight);
+  }
+  else if (cmdCopy == 'B')
+  {
+    float error = targetYaw - currentYaw;
+    int correction = constrain((int)(Kp * error), -MAX_CORRECTION, MAX_CORRECTION);
+    int speedLeft = constrain(BACKWARD_SPEED + correction, 0, SPEED_MAX);
+    int speedRight = constrain(BACKWARD_SPEED - correction, 0, SPEED_MAX);
+    motorController1.Enable();
+    motorController2.Enable();
+    motorController1.TurnLeft(speedLeft);
+    motorController2.TurnLeft(speedRight);
+  }
+  else if (cmdCopy == 'R')
+  {
     motorController1.Enable();
     motorController2.Enable();
     motorController1.TurnRight(userSpeed);
     motorController2.TurnLeft(userSpeed);
-    break;
-  case 'L':
+  }
+  else if (cmdCopy == 'L')
+  {
     motorController1.Enable();
     motorController2.Enable();
     motorController1.TurnLeft(userSpeed);
     motorController2.TurnRight(userSpeed);
-    break;
-  case 's':
-    motorController1.Disable();
-    motorController2.Disable();
-    break;
   }
 }
 
-void applyCommand(char cmd)
-{
-  switch (cmd)
-  {
-  case 'F':
-    currentCommand = 'F';
-    obstacleDetected = false;
-    currentForwardSpeed = userSpeed;
-    lastAccelTime = millis();
-    resetHeading();
-    sendUdpReply("Forward");
-    break;
-  case 'B':
-    currentCommand = 'B';
-    obstacleDetected = false;
-    resetHeading();
-    sendUdpReply("Backward");
-    break;
-  case 'R':
-    currentCommand = 'R';
-    obstacleDetected = false;
-    sendUdpReply("Right");
-    break;
-  case 'L':
-    currentCommand = 'L';
-    obstacleDetected = false;
-    sendUdpReply("Left");
-    break;
-  case 's':
-    stopMotors();
-    sendUdpReply("Stopped");
-    break;
-  case 'I':
-    userSpeed = constrain(userSpeed + SPEED_STEP, SPEED_MIN, SPEED_MAX);
-    currentForwardSpeed = userSpeed;
-    sendUdpReply(("Spd: " + String(userSpeed)).c_str());
-    break;
-  case 'D':
-    userSpeed = constrain(userSpeed - SPEED_STEP, SPEED_MIN, SPEED_MAX);
-    currentForwardSpeed = userSpeed;
-    sendUdpReply(("Spd: " + String(userSpeed)).c_str());
-    break;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  WIFI — 2-Phase Static IP Assignment
-// ═══════════════════════════════════════════════════════════════════
-
-void connectWiFi()
-{
-  prefs.begin("wifi", true);
-  wifiSSID = prefs.getString("ssid", "");
-  wifiPassword = prefs.getString("password", "");
-  prefs.end();
-
-  if (wifiSSID.length() == 0)
-  {
-    Serial.println("No WiFi credentials. Hold BOOT for portal.");
-    return;
-  }
-
-  WiFi.mode(WIFI_STA);
-  Serial.printf("Connecting to [%s] (Phase 1 - DHCP)...\n", wifiSSID.c_str());
-  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000)
-  {
-    esp_task_wdt_reset();
-    delay(250);
-    Serial.print('.');
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("\nInitial DHCP connection done!");
-    gateway = WiFi.gatewayIP();
-    subnet = WiFi.subnetMask();
-    dns = gateway;
-    staticIP = IPAddress(gateway[0], gateway[1], gateway[2], DEVICE_LAST_OCTET);
-
-    WiFi.disconnect();
-    delay(500);
-
-    Serial.println("Reconnecting (Phase 2 - Fixed IP)...");
-    WiFi.config(staticIP, gateway, subnet, dns);
-    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-
-    start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000)
-    {
-      esp_task_wdt_reset();
-      delay(250);
-      Serial.print('.');
-    }
-
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      Serial.printf("\nWiFi connected! Fixed IP: %s\n", WiFi.localIP().toString().c_str());
-      udp.begin(UDP_PORT);
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  BCI RAW DATA CALLBACK
-// ═══════════════════════════════════════════════════════════════════
 void onRawDataReceived(int16_t raw)
 {
   uint8_t detectedBlinks = blinkProcessor.processRaw(raw);
@@ -496,43 +344,173 @@ void onRawDataReceived(int16_t raw)
   }
 }
 
+void sendUdpReply(const char *msg)
+{
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    udp.beginPacket(udp.remoteIP(), UDP_REPLY_PORT);
+    udp.print(msg);
+    udp.endPacket();
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
-//  SETUP
+//  Core 0: Safe WiFi & UDP Task (RF Burst Strategy)
+// ═══════════════════════════════════════════════════════════════════
+void networkTask(void *pvParameters)
+{
+  prefs.begin("wifi", true);
+  wifiSSID = prefs.getString("ssid", "");
+  wifiPassword = prefs.getString("password", "");
+  prefs.end();
+
+  unsigned long lastWifiTry = 0;
+  bool udpStarted = false;
+
+  for (;;)
+  {
+    if (configMode)
+    {
+      vTaskDelay(500 / portTICK_PERIOD_MS);
+      continue;
+    }
+
+    bool isConnected = (WiFi.status() == WL_CONNECTED);
+
+    // Phase 1: Disconnected (Scanning via Time-Slicing)
+    if (!isConnected && wifiSSID.length() > 0)
+    {
+      if (udpStarted)
+      {
+        udp.stop();
+        udpStarted = false;
+        Serial.println("[WIFI] Disconnected. UDP Socket Closed.");
+      }
+
+      // Try connecting every 8 seconds
+      if (millis() - lastWifiTry >= 8000)
+      {
+
+        // Ask for the RF Antenna Token
+        if (xSemaphoreTake(rfMutex, 0) == pdTRUE)
+        {
+          Serial.println("[WIFI] Taking Antenna. Scanning for 3 seconds...");
+          WiFi.mode(WIFI_STA);
+          WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+          unsigned long scanStart = millis();
+          while (WiFi.status() != WL_CONNECTED && millis() - scanStart < 3000)
+          {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+          }
+
+          if (WiFi.status() == WL_CONNECTED)
+          {
+            gateway = WiFi.gatewayIP();
+            subnet = WiFi.subnetMask();
+            dns = gateway;
+            staticIP = IPAddress(gateway[0], gateway[1], gateway[2], DEVICE_LAST_OCTET);
+
+            WiFi.config(staticIP, gateway, subnet, dns);
+            Serial.printf("[WIFI] Connected! Fixed IP: %s\n", WiFi.localIP().toString().c_str());
+          }
+          else
+          {
+            Serial.println("[WIFI] Scan Failed. Yielding antenna to BT.");
+            WiFi.disconnect(true); // Stop scanning to free the antenna
+          }
+
+          xSemaphoreGive(rfMutex); // Return the token
+          lastWifiTry = millis();
+        }
+      }
+    }
+    // Phase 2: Connected (Safe UDP operations)
+    else if (isConnected)
+    {
+      if (!udpStarted)
+      {
+        if (udp.begin(UDP_PORT))
+        {
+          udpStarted = true;
+          Serial.println("[WIFI] UDP Socket Started.");
+        }
+      }
+
+      int packetSize = udp.parsePacket();
+      if (packetSize > 0)
+      {
+        int len = udp.read(udpPacket, sizeof(udpPacket) - 1);
+        if (len > 0)
+        {
+          udpPacket[len] = '\0';
+          char cmd = udpPacket[0];
+          Serial.printf("[UDP] Received Command: %c\n", cmd);
+
+          xSemaphoreTake(sysMutex, portMAX_DELAY);
+          if (cmd == 'S' || cmd == 's')
+          {
+            currentCommand = 's';
+            isExecutingCommand = false;
+            sendUdpReply("Stopped");
+          }
+          else if (cmd == 'F' || cmd == 'B' || cmd == 'L' || cmd == 'R')
+          {
+            currentCommand = cmd;
+            isExecutingCommand = true;
+            sendUdpReply("Moving");
+          }
+          xSemaphoreGive(sysMutex);
+        }
+      }
+    }
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  SETUP & LOOP (Core 1 Default)
 // ═══════════════════════════════════════════════════════════════════
 void setup()
 {
   Serial.begin(115200);
   pinMode(CONFIG_BTN, INPUT_PULLUP);
 
-  // Configure Watchdog Timer (v2.x compatibility)
-  esp_task_wdt_init(10, true);
-  esp_task_wdt_add(NULL);
+  sysMutex = xSemaphoreCreateMutex();
+  rfMutex = xSemaphoreCreateMutex();
 
-  // Check for Boot Button holding
+  // Initialize Bluetooth parameters but do not scan aggressively yet
+  btManager.begin();
+  pinMode(PIN_BT_STATUS, OUTPUT);
+  pinMode(PIN_SIGNAL_STATUS, OUTPUT);
+  pinMode(PIN_MENU_ACTIVE, OUTPUT);
+  signalReader.on_raw_received = onRawDataReceived;
+
+  // Boot Button Check for Portal
   Serial.println("Hold BOOT button now for WiFi setup...");
   unsigned long holdStart = millis();
   bool enteredConfig = false;
   while (millis() - holdStart < HOLD_MS)
   {
-    esp_task_wdt_reset();
-    if (digitalRead(CONFIG_BTN) == HIGH)
+    if (digitalRead(CONFIG_BTN) == LOW)
+      enteredConfig = true;
+    else
     {
       enteredConfig = false;
       break;
     }
-    enteredConfig = true;
     delay(50);
   }
-  if (enteredConfig && digitalRead(CONFIG_BTN) == LOW)
-  {
+  if (enteredConfig)
     startConfigPortal();
-  }
 
-  // Initialize Network & Gyro
-  connectWiFi();
+  // Launch Core 0 Network Task
+  xTaskCreatePinnedToCore(networkTask, "NetworkTask", 10000, NULL, 1, NULL, 0);
+
+  // Init Sensors
   if (!mpu.begin())
   {
-    Serial.println("WARNING: MPU6050 not found.");
+    Serial.println("[HW] WARNING: MPU6050 not found.");
   }
   else
   {
@@ -541,67 +519,75 @@ void setup()
     calibrateGyro();
   }
 
-  // Initialize BCI System
-  btManager.begin();
-  pinMode(PIN_BT_STATUS, OUTPUT);
-  pinMode(PIN_SIGNAL_STATUS, OUTPUT);
-  pinMode(PIN_MENU_ACTIVE, OUTPUT);
-  signalReader.on_raw_received = onRawDataReceived;
-
   lastGyroTime = millis();
   lastAccelTime = millis();
-  lastWifiCheck = millis();
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  MAIN LOOP
-// ═══════════════════════════════════════════════════════════════════
 void loop()
 {
-  esp_task_wdt_reset();
+  bool isConnected = btManager.isConnected();
+  static unsigned long lastBtTry = 0;
+  static bool lastConnectState = false;
 
-  // --- 1. BOOT BUTTON CHECK ---
-  static unsigned long btnPressStart = 0;
-  if (digitalRead(CONFIG_BTN) == LOW)
+  // Status Change Print
+  if (isConnected != lastConnectState)
   {
-    if (btnPressStart == 0)
-      btnPressStart = millis();
-    if (millis() - btnPressStart >= HOLD_MS)
+    Serial.printf("[BT] Status: %s\n", isConnected ? "CONNECTED" : "DISCONNECTED");
+    lastConnectState = isConnected;
+  }
+
+  // Phase 1: Disconnected (Scanning via Time-Slicing)
+  if (!isConnected)
+  {
+    // Try connecting every 3 seconds
+    if (millis() - lastBtTry >= 3000)
     {
-      startConfigPortal();
+
+      if (xSemaphoreTake(rfMutex, 0) == pdTRUE)
+      {
+        Serial.println("[BT] Taking Antenna. Scanning for 1.5 seconds...");
+
+        unsigned long btStart = millis();
+        while (!btManager.isConnected() && millis() - btStart < 1500)
+        {
+          autoConnector.update(); // Fire connection requests
+          vTaskDelay(50 / portTICK_PERIOD_MS);
+        }
+
+        if (!btManager.isConnected())
+        {
+          Serial.println("[BT] Scan Finished. Yielding antenna to WiFi.");
+        }
+
+        xSemaphoreGive(rfMutex);
+        lastBtTry = millis();
+      }
     }
   }
+  // Phase 2: Connected (Safe continuous reads)
   else
   {
-    btnPressStart = 0;
-  }
-
-  // --- 2. WIFI AUTO-RECONNECT ---
-  if (millis() - lastWifiCheck >= WIFI_CHECK_MS)
-  {
-    lastWifiCheck = millis();
-    if (WiFi.status() != WL_CONNECTED && !configMode)
+    while (btManager.available())
     {
-      stopMotors();
-      inTransition = false;
-      pendingCommand = 0;
-      WiFi.reconnect();
+      signalReader.readPacket(&btManager);
     }
   }
 
-  // --- 3. TRANSITION DELAY MANAGER ---
-  if (inTransition && millis() - transitionStart >= TRANSITION_MS)
+  // Signal Quality Tracking Print
+  BrainwaveState brainState = signalReader.getState();
+  digitalWrite(PIN_SIGNAL_STATUS, (isConnected && brainState.poor_signal > 0) ? HIGH : LOW);
+
+  static uint8_t lastSignal = 200;
+  if (isConnected && brainState.poor_signal != lastSignal)
   {
-    inTransition = false;
-    applyCommand(pendingCommand);
-    pendingCommand = 0;
+    Serial.printf("[BT] Poor Signal Quality: %d\n", brainState.poor_signal);
+    lastSignal = brainState.poor_signal;
   }
 
-  // --- 4. ULTRASONIC OBSTACLE DETECTION ---
-  if (currentCommand != 'B' && millis() - lastSensorRead >= SENSOR_READ_INTERVAL)
+  // Ultrasonic Polling
+  if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL)
   {
     lastSensorRead = millis();
-
     if (readLeftNext)
     {
       int d = sonarLeft.ping_cm();
@@ -616,124 +602,56 @@ void loop()
     }
     readLeftNext = !readLeftNext;
 
-    bool newObstacle = (distLeft < SAFE_DISTANCE) || (distRight < SAFE_DISTANCE);
-    if (newObstacle && !obstacleDetected)
+    if ((distLeft < SAFE_DISTANCE || distRight < SAFE_DISTANCE) && !obstacleDetected)
     {
+      xSemaphoreTake(sysMutex, portMAX_DELAY);
       obstacleDetected = true;
-      inTransition = false;
-      pendingCommand = 0;
-      stopMotors(); // Halt the wheels
-
-      // CRITICAL BCI SYNC: Tell the Brain Menu that we stopped forcefully!
+      currentCommand = 's';
       isExecutingCommand = false;
-
-      char msg[64];
-      if (distLeft < SAFE_DISTANCE)
-        sendUdpReply("OBSTACLE L");
-      if (distRight < SAFE_DISTANCE)
-        sendUdpReply("OBSTACLE R");
+      xSemaphoreGive(sysMutex);
+      Serial.println("[HW] Obstacle Detected! Braking.");
+      stopMotors();
+      sendUdpReply("OBSTACLE");
     }
   }
 
-  // --- 5. EXECUTE MOTOR PID LOGIC ---
   executeMovement();
 
-  // --- 6. BCI HEADSET: AUTO-CONNECT & READ ---
-  // autoConnector.update();
-  bool isConnected = btManager.isConnected();
-  digitalWrite(PIN_BT_STATUS, isConnected ? HIGH : LOW);
-
-  if (isConnected)
-  {
-    while (btManager.available())
-    {
-      signalReader.readPacket(&btManager);
-    }
-  }
-
-  BrainwaveState brainState = signalReader.getState();
-  digitalWrite(PIN_SIGNAL_STATUS, (isConnected && brainState.poor_signal > 0) ? HIGH : LOW);
-
-  // --- 7. BCI BRAIN CONTROL LOGIC ---
+  // BCI Commands Handling
   uint8_t blinksToProcess = pendingBlinks;
   pendingBlinks = 0;
 
-  if (!isExecutingCommand)
+  xSemaphoreTake(sysMutex, portMAX_DELAY);
+  bool executingCopy = isExecutingCommand;
+  xSemaphoreGive(sysMutex);
+
+  if (!executingCopy)
   {
-    // We are in the MENU Phase
     CommandAction action = movementLogic.processInput(blinksToProcess, brainState.attention);
-    SystemState currentState = movementLogic.getCurrentState();
+    digitalWrite(PIN_MENU_ACTIVE, (movementLogic.getCurrentState() != STATE_NEUTRAL) ? HIGH : LOW);
 
-    digitalWrite(PIN_MENU_ACTIVE, (currentState != STATE_NEUTRAL) ? HIGH : LOW);
-
-    // Map BCI output to Wheelchair Motor Commands
-    if (action == CMD_WC_FORWARD)
+    if (action == CMD_WC_FORWARD || action == CMD_WC_LEFT || action == CMD_WC_RIGHT)
     {
+      xSemaphoreTake(sysMutex, portMAX_DELAY);
       isExecutingCommand = true;
-      applyCommand('F'); // Tell motors to go Forward!
-    }
-    else if (action == CMD_WC_LEFT)
-    {
-      isExecutingCommand = true;
-      applyCommand('L'); // Tell motors to spin Left
-    }
-    else if (action == CMD_WC_RIGHT)
-    {
-      isExecutingCommand = true;
-      applyCommand('R'); // Tell motors to spin Right
+      currentCommand = (action == CMD_WC_FORWARD) ? 'F' : (action == CMD_WC_LEFT) ? 'L'
+                                                                                  : 'R';
+      xSemaphoreGive(sysMutex);
+      Serial.printf("[BCI] Command Activated: %c\n", currentCommand);
     }
   }
   else
   {
-    // We are in the DRIVING Phase
-    // A single blink sequence here acts as our emergency brake.
+    // Emergency Brake Check
     if (blinksToProcess > 0)
     {
+      xSemaphoreTake(sysMutex, portMAX_DELAY);
       isExecutingCommand = false;
-      applyCommand('s'); // Tell motors to STOP!
+      currentCommand = 's';
+      xSemaphoreGive(sysMutex);
+      Serial.println("[BCI] Emergency Brake Blink Triggered!");
     }
   }
 
-  // --- 8. UDP MANUAL CONTROL BACKUP ---
-  // (Still parses packets from your phone so Mario can intervene via WiFi if needed)
-  int packetSize = udp.parsePacket();
-  if (packetSize > 0)
-  {
-    int len = udp.read(udpPacket, sizeof(udpPacket) - 1);
-    if (len > 0)
-      udpPacket[len] = '\0';
-
-    char command = udpPacket[0];
-    if (command == 'S')
-      command = 's';
-
-    if (command == 'I' || command == 'D')
-    {
-      applyCommand(command);
-    }
-    else if (command == 's')
-    {
-      inTransition = false;
-      pendingCommand = 0;
-      applyCommand('s');
-      isExecutingCommand = false; // Sync BCI state to UDP Stop
-    }
-    else if (inTransition)
-    {
-      pendingCommand = command;
-    }
-    else if (currentCommand != 's' && currentCommand != command)
-    {
-      sendUdpReply("Switching - braking...");
-      pendingCommand = command;
-      inTransition = true;
-      transitionStart = millis();
-      stopMotors();
-    }
-    else
-    {
-      applyCommand(command);
-      isExecutingCommand = true; // Sync BCI state to UDP Drive
-    }
-  }
+  vTaskDelay(10 / portTICK_PERIOD_MS);
 }
