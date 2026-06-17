@@ -3,17 +3,19 @@
 
 #include <Arduino.h>
 
-// The 4 main states from your flowchart
 enum SystemState {
+    STATE_LOCKED,       
     STATE_NEUTRAL,
     STATE_MENU,
     STATE_WHEELCHAIR,
-    STATE_IOT
+    STATE_WHEELCHAIR_MOVING, // NEW: Ignores blinks, waits for Jaw Clench
+    STATE_IOT,
+    STATE_CURTAIN_MOVING     // NEW: 5-second window for emergency stop
 };
 
-// The specific commands the logic will return to main.cpp
 enum CommandAction {
     CMD_NONE,           
+    CMD_SYSTEM_UNLOCKED, 
     CMD_OPEN_MENU,      
     CMD_WC_FORWARD,
     CMD_WC_LEFT,
@@ -28,16 +30,20 @@ class MovementLogic {
 public:
     MovementLogic();
 
-    // Removed the wifi boolean from the input parameters
-    CommandAction processInput(uint8_t blinkCount, uint8_t attention);
-
+    CommandAction processContinuous(uint8_t attention, uint8_t poorSignal);
+    CommandAction processBlinks(uint8_t blinkCount);
+    
+    void lockSystem();
+    void forceNeutral(); // Used by the Jaw Clench to reset the system
     SystemState getCurrentState();
 
 private:
     SystemState currentState;
     uint32_t lastActivityTime;
+    uint32_t curtainStartTime;
     
-    const uint32_t MENU_TIMEOUT_MS = 5000; 
+    const uint32_t MENU_TIMEOUT_MS = 8000;    // 8 seconds
+    const uint32_t CURTAIN_TIMEOUT_MS = 5000; // 5 seconds
 };
 
 #endif

@@ -2,48 +2,31 @@
 #define BT_MANAGER_H
 
 #include <Arduino.h>
-#include "BluetoothSerial.h"
+#include <SoftwareSerial.h> // Replaces the ESP32 BluetoothSerial library
 
 class BTManager
 {
 public:
-    /* * Constructor.
-     * Does not initialize hardware immediately to avoid startup crashes.
-     */
     BTManager();
     void begin();
-    /* * Initializes the ESP32 Bluetooth module as a Master/Client.
-     * Tries to connect to the provided MAC address once.
-     * Returns true if successfully connected, false otherwise.
-     * (Timeout and retry logic are handled externally in main.cpp)
-     */
+    
+    // Checks if the hardware STATE pin is HIGH
     bool connectToDevice(uint8_t *macAddress);
 
-    /* * Checks if there is any unread data in the Bluetooth buffer.
-     * Returns the number of bytes available.
-     */
     int available();
-
-    /* * Reads a single byte from the Bluetooth stream.
-     * Returns the byte as uint8_t. You must check available() before calling this.
-     */
     uint8_t readByte();
-
-    /* * Safely disconnects and turns off the Bluetooth to free memory.
-     */
     void close();
-
-    /* * Checks if the Bluetooth connection is currently active.
-     */
     bool isConnected();
 
-private:
-    /* * The internal BluetoothSerial object used to manage the hardware radio.
-     */
-    BluetoothSerial SerialBT;
+    // Storing the Headset MAC directly in the class as requested
+    // Replace with your MindWave's actual MAC address
+    uint8_t headsetMac[6] = {0x00, 0xBA, 0x55, 0x81, 0xE2, 0xCC};
 
-    /* * Flag to keep track of connection status.
-     */
+private:
+    // Wemos uses SoftwareSerial to talk to the external BT module
+    SoftwareSerial* btSerial;
+
+    // Flag to keep track of connection status
     bool connectedStatus;
 };
 

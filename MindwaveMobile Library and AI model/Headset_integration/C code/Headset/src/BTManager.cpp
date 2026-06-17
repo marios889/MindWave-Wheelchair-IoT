@@ -1,68 +1,69 @@
 #include "BTManager.h"
 
+// Placeholder pins - you can change these later once you wire the module
+#define BT_RX_PIN D5
+#define BT_TX_PIN D6
+#define BT_STATE_PIN D7 // MUST connect to the HC-05 "STATE" pin to detect connection
+
 BTManager::BTManager()
 {
     connectedStatus = false;
+    // Initialize the serial pipe to the external module
+    btSerial = new SoftwareSerial(BT_RX_PIN, BT_TX_PIN);
+}
+
+void BTManager::begin()
+{
+    // 9600 is the standard default baud rate for HC-05 communication
+    btSerial->begin(9600);
+
+    // Configure the Wemos to read the hardware state from the module
+    pinMode(BT_STATE_PIN, INPUT);
+    delay(500);
 }
 
 bool BTManager::connectToDevice(uint8_t *macAddress)
 {
-    /* * Initialize Bluetooth in Master mode.
-     * Parameters: Device Name (optional), true (Master Mode).
+    /* * NOTE: External HC-05 modules in Master Mode usually auto-connect
+     * to a paired MAC address automatically on power-up.
+     * * If you want the Wemos to force the connection dynamically via AT Commands,
+     * you would pull the HC-05 EN pin HIGH and send "AT+LINK=<MAC>" over btSerial here.
+     * * For now, we simply check if the module has successfully auto-connected.
      */
 
-    // Give the hardware a short moment to initialize
-    SerialBT.setPin("0000");
-    /* * Attempt a single connection to the specific MAC address of the MW003.
-     * We convert the String to a const char* as required by the library.
-     * Returns immediately with the result.
-     */
-    connectedStatus = SerialBT.connect(macAddress);
-
+    connectedStatus = digitalRead(BT_STATE_PIN);
     return connectedStatus;
 }
 
 int BTManager::available()
 {
-    if (connectedStatus)
-    {
-        return SerialBT.available();
-    }
-    return 0;
-}
-
-void BTManager::begin()
-{
-    SerialBT.begin("ESP32_BCI_Controller", true);
-    delay(500);
+    return btSerial->available();
 }
 
 uint8_t BTManager::readByte()
 {
-    /* * Read and return 1 byte from the Bluetooth RX buffer.
-     * Assumes available() was checked prior to calling.
-     */
-    return SerialBT.read();
+    return btSerial->read();
 }
 
 bool BTManager::isConnected()
 {
-    /* * In Master mode, we cannot just check if we have a client.
-     * We must actively ask the Bluetooth stack if the SPP channel
-     * to the MAC address is still open.
+    /* * We can no longer use SerialBT.hasClient().
+     * Instead, we read the physical STATE pin of the external BT module.
+     * HIGH = Connected to headset, LOW = Disconnected/Searching
      */
-    return SerialBT.hasClient();
+    connectedStatus = digitalRead(BT_STATE_PIN);
+    return connectedStatus;
 }
 
 void BTManager::close()
 {
-    /* * Closes the connection and shuts down the Bluetooth radio.
-     * This is crucial to prevent memory leaks if the system restarts.
+    /* * External modules act as transparent serial pipes.
+     * To "close" it from the Wemos side, we just clear the buffer.
+     * (Disconnecting requires AT commands or cutting power to the module).
      */
-    if (connectedStatus)
+    while (btSerial->available())
     {
-        SerialBT.disconnect();
-        SerialBT.end();
-        connectedStatus = false;
+        btSerial->read();
     }
+    connectedStatus = false;
 }
