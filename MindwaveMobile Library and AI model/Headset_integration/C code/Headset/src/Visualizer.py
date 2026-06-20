@@ -1,6 +1,7 @@
 import serial
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.widgets import TextBox
 from collections import deque
 import numpy as np
 import sys
@@ -8,7 +9,7 @@ import sys
 # ==========================================
 # الإعدادات
 # ==========================================
-ESP32_PORT = '/dev/cu.usbserial-10'  # تأكد إن ده البورت بتاعك
+ESP32_PORT = 'COM7'  # تأكد إن ده البورت بتاعك
 BAUD_RATE = 115200
 
 try:
@@ -25,8 +26,12 @@ WINDOW_SIZE = 1024
 y_data = deque([0] * WINDOW_SIZE, maxlen=WINDOW_SIZE)
 x_data = np.linspace(0, 2, WINDOW_SIZE)
 
-fig, ax = plt.subplots(figsize=(10, 5))
+fig, ax = plt.subplots(figsize=(10, 6)) # Slightly taller to fit the text box
 fig.canvas.manager.set_window_title('MindWave Live Raw Data')
+
+# Make room for the text box at the bottom
+plt.subplots_adjust(bottom=0.2)
+
 line, = ax.plot(x_data, y_data, color='#00ff00', linewidth=1)
 
 # تنسيق الشاشة عشان تستوعب الـ 1000 بتاعتك
@@ -44,6 +49,26 @@ ax.axhline(y=LOWER_THRESH, color='blue', linestyle='--', label=f'Lower ({LOWER_T
 ax.legend(loc='upper right')
 ax.set_xlabel('Time (Seconds)', color='white')
 ax.set_ylabel('Raw EEG (Amplitude)', color='white')
+
+# ==========================================
+# Text Box Setup (SEND COMMANDS)
+# ==========================================
+# Position: [left, bottom, width, height]
+axbox = fig.add_axes([0.2, 0.05, 0.6, 0.075])
+# FIXED LINE:
+text_box = TextBox(axbox, 'Command: ', color='0.95', hovercolor='1.0')
+text_box.label.set_color('white')
+
+def submit_command(text):
+    if ser and ser.is_open and text:
+        # Send the character over serial
+        ser.write(text.encode('utf-8'))
+        print(f"\n>> Sent Command to Wemos: {text}\n")
+    text_box.set_val("") # Clear the box automatically after sending
+
+# Bind the Enter key to the submit function
+text_box.on_submit(submit_command)
+
 # ==========================================
 # دورة التحديث
 # ==========================================
