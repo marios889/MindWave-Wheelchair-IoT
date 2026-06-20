@@ -50,3 +50,18 @@ void BuzzerManager::beepBrake() {
     delay(500); 
     digitalWrite(pin, LOW);
 }
+
+void BuzzerManager::playTone(unsigned long duration) {
+    digitalWrite(pin, HIGH);
+    delay(duration);
+    digitalWrite(pin, LOW);
+}
+
+void BuzzerManager::playTone(unsigned long duration, uint8_t count) {
+    for (uint8_t i = 0; i < count; i++) {
+        digitalWrite(pin, HIGH);
+        delay(duration);
+        digitalWrite(pin, LOW);
+        if (i < count - 1) delay(100); // 100ms gap between beeps
+    }
+}

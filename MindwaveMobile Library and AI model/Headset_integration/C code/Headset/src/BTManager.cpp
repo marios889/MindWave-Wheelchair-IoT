@@ -1,8 +1,8 @@
 #include "BTManager.h"
 
 // Placeholder pins - you can change these later once you wire the module
-#define BT_RX_PIN D5
-#define BT_TX_PIN D6
+#define BT_RX_PIN D1
+#define BT_TX_PIN D2
 #define BT_STATE_PIN D7 // MUST connect to the HC-05 "STATE" pin to detect connection
 
 BTManager::BTManager()
@@ -15,7 +15,7 @@ BTManager::BTManager()
 void BTManager::begin()
 {
     // 9600 is the standard default baud rate for HC-05 communication
-    btSerial->begin(9600);
+    btSerial->begin(57600);
 
     // Configure the Wemos to read the hardware state from the module
     pinMode(BT_STATE_PIN, INPUT);

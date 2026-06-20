@@ -1,125 +1,89 @@
 #include "MovementLogic.h"
 
-MovementLogic::MovementLogic()
-{
-    currentState = STATE_LOCKED;
-    lastActivityTime = 0;
-    curtainStartTime = 0;
-}
-
-void MovementLogic::lockSystem()
-{
+MovementLogic::MovementLogic() {
     currentState = STATE_LOCKED;
 }
 
-void MovementLogic::forceNeutral()
-{
-    currentState = STATE_NEUTRAL;
-}
-
-SystemState MovementLogic::getCurrentState()
-{
+SystemState MovementLogic::getCurrentState() {
     return currentState;
 }
 
-CommandAction MovementLogic::processContinuous(uint8_t attention, uint8_t poorSignal)
-{
-    if (currentState == STATE_LOCKED)
-    {
-        if (poorSignal == 0 && attention >= 50)
-        {
-            currentState = STATE_NEUTRAL;
-            return CMD_SYSTEM_UNLOCKED;
-        }
-    }
+void MovementLogic::lockSystem() {
+    currentState = STATE_LOCKED;
+}
 
-    // Check Curtain Window Timeout
-    if (currentState == STATE_CURTAIN_MOVING)
-    {
-        if (millis() - curtainStartTime >= CURTAIN_TIMEOUT_MS)
-        {
-            currentState = STATE_NEUTRAL;
-        }
-    }
+void MovementLogic::forceNeutral() {
+    currentState = STATE_IDLE; 
+}
 
+CommandAction MovementLogic::processContinuous(uint8_t attention, uint8_t poorSignal) {
+    // Unlock condition: Perfect signal + Focus >= 50
+    if (currentState == STATE_LOCKED && poorSignal == 0 && attention >= 50) {
+        currentState = STATE_IDLE;
+        return CMD_SYSTEM_UNLOCKED;
+    }
     return CMD_NONE;
 }
 
-CommandAction MovementLogic::processBlinks(uint8_t blinkCount)
-{
-    CommandAction triggeredCommand = CMD_NONE;
-    uint32_t now = millis();
+CommandAction MovementLogic::processBlinks(uint8_t blinks) {
+    if (blinks == 0) return CMD_NONE;
 
-    if (currentState == STATE_LOCKED || currentState == STATE_WHEELCHAIR_MOVING)
-    {
-        return CMD_NONE;
+    switch (currentState) {
+        
+        case STATE_IDLE:
+            if (blinks >= 2) { 
+                currentState = STATE_MAIN_MENU;
+                return CMD_OPEN_MENU;
+            }
+            break;
+
+        case STATE_MAIN_MENU:
+            if (blinks == 1) {
+                currentState = STATE_WHEELCHAIR;
+                return CMD_SELECT_WHEELCHAIR;
+            } else if (blinks == 2) {
+                currentState = STATE_IOT;
+                return CMD_SELECT_IOT;
+            }
+            break;
+
+        case STATE_WHEELCHAIR:
+        case STATE_WHEELCHAIR_MOVING:
+            if (blinks == 1) {
+                currentState = STATE_WHEELCHAIR_MOVING;
+                return CMD_WC_FWD;
+            } else if (blinks == 2) {
+                currentState = STATE_WHEELCHAIR_MOVING;
+                return CMD_WC_LEFT;
+            } else if (blinks == 3) {
+                currentState = STATE_WHEELCHAIR_MOVING;
+                return CMD_WC_RIGHT;
+            }
+            break;
+
+        case STATE_IOT:
+            if (blinks == 1) {
+                return CMD_IOT_LAMP;
+            } else if (blinks == 2) {
+                currentState = STATE_CURTAIN_MOVING;
+                return CMD_IOT_CURTAIN;
+            } else if (blinks == 3) {
+                return CMD_IOT_FAN; 
+            }
+            break;
+
+        case STATE_CURTAIN_MOVING:
+            if (blinks == 1) {
+                currentState = STATE_IDLE; 
+                return CMD_STOP;
+            }
+            break;
+
+        // Explicitly handling these kills the [-Wswitch] warnings
+        case STATE_LOCKED:
+        default:
+            break;
     }
 
-    if (currentState != STATE_NEUTRAL && currentState != STATE_CURTAIN_MOVING)
-    {
-        if (now - lastActivityTime >= MENU_TIMEOUT_MS)
-        {
-            currentState = STATE_NEUTRAL;
-            return CMD_NONE;
-        }
-    }
-
-    if (blinkCount == 0)
-        return CMD_NONE;
-    lastActivityTime = now;
-
-    switch (currentState)
-    {
-    case STATE_NEUTRAL:
-        if (blinkCount == 2)
-        {
-            currentState = STATE_MENU;
-            triggeredCommand = CMD_OPEN_MENU;
-        }
-        break;
-
-    case STATE_MENU:
-        if (blinkCount == 1)
-            currentState = STATE_WHEELCHAIR;
-        else if (blinkCount == 2)
-            currentState = STATE_IOT;
-        break;
-
-    case STATE_WHEELCHAIR:
-        if (blinkCount == 1)
-            triggeredCommand = CMD_WC_FORWARD;
-        else if (blinkCount == 2)
-            triggeredCommand = CMD_WC_LEFT;
-        else if (blinkCount == 3)
-            triggeredCommand = CMD_WC_RIGHT;
-
-        if (triggeredCommand != CMD_NONE)
-        {
-            currentState = STATE_WHEELCHAIR_MOVING;
-        }
-        break;
-
-    case STATE_IOT:
-        if (blinkCount == 1)
-            triggeredCommand = CMD_IOT_LAMP;
-        else if (blinkCount == 2)
-        {
-            triggeredCommand = CMD_IOT_CURTAIN;
-            currentState = STATE_CURTAIN_MOVING;
-            curtainStartTime = now;
-        }
-        else if (blinkCount == 3)
-            triggeredCommand = CMD_IOT_FAN; // Or 30A Device
-        break;
-
-    case STATE_CURTAIN_MOVING:
-        if (blinkCount == 1)
-        {
-            triggeredCommand = CMD_STOP;
-            currentState = STATE_NEUTRAL;
-        }
-        break;
-    }
-
-    return triggeredCommand;
+    return CMD_NONE;
 }

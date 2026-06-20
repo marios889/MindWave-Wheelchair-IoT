@@ -3,7 +3,8 @@
 
 #include <Arduino.h>
 
-class BuzzerManager {
+class BuzzerManager
+{
 private:
     uint8_t pin;
 
@@ -15,6 +16,8 @@ public:
     void beepBlinks(int count);
     void beepFailure();
     void beepBrake();
+    void playTone(unsigned long duration);
+    void playTone(unsigned long duration, uint8_t count);
 };
 
 #endif
