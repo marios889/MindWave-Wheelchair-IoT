@@ -7,26 +7,32 @@
 #include "SignalReader.h"
 #include "BlinkProcessor.h"
 #include "JawDetector.h"
+#include "MovementLogic.h"
 #include "BuzzerManager.h"
 #include "ESPNowManager.h"
 #include "UDPManager.h"
 
 // ==========================================
-// SYSTEM & NETWORK CONFIG
+// SYSTEM PINS & CONFIG
 // ==========================================
-const char *defaultSSID = "DiamondTDA";
-const char *defaultPass = "123454321";
+const char *defaultSSID = "Friends";
+const char *defaultPass = "11110000  ";
 const uint8_t BUZZER_PIN = D5;
 const uint8_t WIFI_BTN_PIN = D3;
-const uint16_t UDP_BROADCAST_PORT = 7777;
 
-// --- YOUR ESP-NOW STRUCT ---
-// (Make sure this perfectly matches the struct on your motor controller)
-typedef struct WheelchairCommand
-{
-    uint8_t action; // 0=Brake, 1=Forward, 2=Left, 3=Right
-} WheelchairCommand;
-WheelchairCommand chairCmd;
+// ==========================================
+// TARGET PORTS & STATIC IPs
+// ==========================================
+const int port10A = 8000;
+const int port30A = 8001;
+const int portCurtain = 8007;
+
+// Wheelchair is assumed to be the one static IP we always know
+IPAddress ipWC(192, 168, 1, 80);
+const int portWC = 8008;
+
+// Stored IPs for overrides
+IPAddress activeCurtainIP;
 
 // ==========================================
 // OBJECT INSTANTIATION
@@ -36,49 +42,35 @@ AutoConnector autoConnector(&bt);
 SignalReader reader;
 BlinkProcessor blinker;
 JawDetector jaw;
+MovementLogic logic;
 BuzzerManager buzzer(BUZZER_PIN);
 ESPNowManager espNow;
 UDPManager udp;
 WiFiManager wifiManager;
 
 // ==========================================
-// SYSTEM STATES & VARIABLES
+// GLOBAL STATE & TIMING VARIABLES
 // ==========================================
-enum SystemState
-{
-    STATE_WAITING_BT,
-    STATE_HANDSHAKE,
-    STATE_IDLE_MENU,
-    STATE_WHEELCHAIR_IDLE,
-    STATE_WHEELCHAIR_MOVING,
-    STATE_IOT_MODE
-};
-SystemState currentState = STATE_WAITING_BT;
-
 bool isWiFiReady = false;
 volatile uint8_t pendingBlinks = 0;
 int16_t latestRawValue = 0;
 
-// --- IoT Toggles ---
-bool state10A = false;
-bool state30A = false;
-bool curtainOpen = false;
+// IoT Toggle States
+bool state10A_isOpen = false;
+bool state30A_isOpen = false;
+bool curtain_isOpen = false;
 
-// --- Safety Timers ---
+// Safety Timers
 uint32_t lastValidPacketTime = 0;
 uint32_t badSignalStartTime = 0;
 bool isSignalBad = false;
 
-// --- Special Overrides ---
+// Curtain Override Timer
 uint32_t curtainOverrideStartTime = 0;
-bool curtainOverrideActive = false;
-
-uint32_t jawStartTime = 0;
-bool jawIsClenching = false;
-const int16_t JAW_THRESH = 1500; // Calibrate based on your jaw strength
-
+uint32_t lastActionTime = 0;
+const uint32_t GLOBAL_TIMEOUT_MS = 8000;
 // ==========================================
-// WIFI BUTTON LOGIC (Unchanged)
+// WIFI BUTTON LOGIC
 // ==========================================
 unsigned long wifiButtonPressStart = 0;
 bool wifiButtonWasPressed = false;
@@ -105,6 +97,7 @@ void checkWiFiButton()
         {
             wifiHoldActionDone = true;
             Serial.println("\n>> STARTING WIFI CONFIG PORTAL");
+            logic.lockSystem();
             buzzer.playTone(1000);
             wifiManager.startConfigPortal("Headset_Config");
             Serial.println(">> Config Saved! Rebooting...");
@@ -120,46 +113,30 @@ void checkWiFiButton()
 void handleRawData(int16_t rawValue)
 {
     latestRawValue = rawValue;
+    Serial.print("RAW:");
+    Serial.println(rawValue);
+    SystemState currentState = logic.getCurrentState();
 
-    // 1. ISOLATED JAW BRAKE (Only when wheelchair is moving)
+    // 1. ISOLATED JAW BRAKE
     if (currentState == STATE_WHEELCHAIR_MOVING)
     {
-        if (rawValue > JAW_THRESH)
+        if (jaw.detect(rawValue))
         {
-            if (!jawIsClenching)
-            {
-                jawIsClenching = true;
-                jawStartTime = millis();
-            }
-            else if (millis() - jawStartTime >= 800)
-            {
-                pendingBlinks = 88; // Secret code for Jaw Brake
-                jawIsClenching = false;
-            }
+            pendingBlinks = 88;
         }
-        else
-        {
-            jawIsClenching = false;
-        }
-        return; // BLOCK BLINKS COMPLETELY WHILE MOVING
+        return;
     }
 
     // 2. CURTAIN 5-SECOND OVERRIDE
-    if (curtainOverrideActive)
+    if (currentState == STATE_CURTAIN_MOVING)
     {
-        if (millis() - curtainOverrideStartTime > 5000)
+        if (millis() - curtainOverrideStartTime <= 5000)
         {
-            curtainOverrideActive = false; // Time's up, return to normal
-        }
-        else
-        {
-            // Looking for ONE instant physical spike to stop it
             if (rawValue > 850)
             {
-                pendingBlinks = 99; // Secret code for Curtain Stop
-                curtainOverrideActive = false;
+                pendingBlinks = 99;
             }
-            return; // Bypass normal debounce logic
+            return;
         }
     }
 
@@ -179,20 +156,46 @@ void setup()
     Serial.begin(115200);
     pinMode(WIFI_BTN_PIN, INPUT_PULLUP);
 
+    Serial.println("\n==========================================");
+    Serial.println(">> HEADSET SYSTEM BOOTING...");
+    Serial.println("==========================================");
+
     WiFi.mode(WIFI_STA);
-    if (WiFi.SSID() == "")
+    String currentSSID = WiFi.SSID();
+
+    if (currentSSID == "")
     {
+        Serial.printf(">> [NETWORK] Trying default SSID: %s\n", defaultSSID);
         WiFi.begin(defaultSSID, defaultPass);
     }
     else
     {
+        Serial.printf(">> [NETWORK] Trying saved SSID: %s\n", currentSSID.c_str());
         WiFi.begin();
+    }
+
+    Serial.print(">> [NETWORK] Connecting");
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20)
+    {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.println("\n>> [NETWORK] Connection successful!");
+    }
+    else
+    {
+        Serial.println("\n>> [!] Wi-Fi timeout. Retrying in background.");
+        Serial.println(">> [TIP] Hold D3 for 3s to open Config Portal.");
     }
 
     bt.begin();
     reader.on_raw_received = handleRawData;
-
-    Serial.println(">> SYSTEM BOOT COMPLETE.");
+    Serial.println(">> SYSTEM BOOT COMPLETE <<");
 }
 
 // ==========================================
@@ -203,42 +206,51 @@ void loop()
     checkWiFiButton();
     autoConnector.update();
 
-    // Network Connect
+    // --- NETWORK CONNECTION & LOGGING ---
     if (WiFi.status() == WL_CONNECTED && !isWiFiReady)
     {
         isWiFiReady = true;
         Serial.println("\n==========================================");
-        Serial.println(">> [NETWORK] WI-FI CONNECTED!");
         Serial.print(">> [NETWORK] IP Address: ");
         Serial.println(WiFi.localIP());
         Serial.println("==========================================\n");
-        espNow.begin(WiFi.channel());
+
+        // Start UDP and the ESP-NOW Discovery Engine
         udp.begin();
+        espNow.begin(WiFi.channel());
     }
     else if (WiFi.status() != WL_CONNECTED && isWiFiReady)
     {
         isWiFiReady = false;
         Serial.println(">> [NETWORK] Wi-Fi Disconnected!");
     }
+
     bool isConnected = bt.isConnected();
     if (!isConnected)
     {
-        if (currentState != STATE_WAITING_BT)
+        if (logic.getCurrentState() != STATE_LOCKED)
         {
-            currentState = STATE_WAITING_BT;
-            Serial.println(">> [!] BT Link Lost.");
+            logic.lockSystem();
+            Serial.println(">> [!] BT Link Lost. System Locked.");
         }
         return;
     }
 
-    // --- PACKET READING & SAFETY TIMERS ---
+    // --- PACKET READING & CONTINUOUS LOGIC ---
     if (reader.readPacket(&bt))
     {
         lastValidPacketTime = millis();
         BrainwaveState state = reader.getState();
 
-        // Safety 1: Motion Artifact / Disconnect Guard (10s)
-        if (currentState > STATE_HANDSHAKE)
+        CommandAction continuousCmd = logic.processContinuous(state.attention, state.poor_signal);
+        if (continuousCmd == CMD_SYSTEM_UNLOCKED)
+        {
+            Serial.println("\n>> [HANDSHAKE] SUCCESS. Focus Locked. System Unlocked.");
+            buzzer.beepConnected();
+            lastActionTime = millis();
+        }
+
+        if (logic.getCurrentState() != STATE_LOCKED)
         {
             if (state.poor_signal > 0)
             {
@@ -249,12 +261,10 @@ void loop()
                 }
                 else if (millis() - badSignalStartTime > 10000)
                 {
-                    Serial.println("\n>> [EMERGENCY] Signal Lost. Braking.");
-                    chairCmd.action = 0;
-                    // Replace with your actual ESPNowManager send method
-                    // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-                    buzzer.playTone(500, 2);
-                    currentState = STATE_HANDSHAKE;
+                    Serial.println("\n>> [EMERGENCY] Signal Lost for 10s. Braking and Locking.");
+                    udp.sendCommand(ipWC, portWC, "S");
+                    buzzer.beepFailure();
+                    logic.lockSystem();
                     isSignalBad = false;
                 }
             }
@@ -263,33 +273,25 @@ void loop()
                 isSignalBad = false;
             }
         }
-
-        // State Transitions
-        if (currentState == STATE_WAITING_BT)
-        {
-            currentState = STATE_HANDSHAKE;
-        }
-        else if (currentState == STATE_HANDSHAKE)
-        {
-            if (state.poor_signal == 0 && state.attention >= 50)
-            {
-                Serial.println("\n>> [HANDSHAKE] SUCCESS. System Unlocked.");
-                buzzer.playTone(1000);
-                currentState = STATE_IDLE_MENU;
-            }
-        }
     }
 
-    // Safety 2: Dead Battery Guard (10s)
-    if (millis() - lastValidPacketTime > 10000 && currentState != STATE_WAITING_BT)
+    // Safety Timer: 10-Second Dead Battery Guard
+    if (millis() - lastValidPacketTime > 10000 && logic.getCurrentState() != STATE_LOCKED)
     {
-        Serial.println("\n>> [FATAL] 10s Dead Battery/Crash. Locking System.");
-        chairCmd.action = 0;
-        // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-        buzzer.playTone(3000, 1);
-        delay(3000);
-        currentState = STATE_WAITING_BT;
+        Serial.println("\n>> [FATAL] No Data For 10s. Dead Battery/Crash. Locking.");
+        udp.sendCommand(ipWC, portWC, "S");
+        buzzer.playTone(3000);
+        logic.lockSystem();
         lastValidPacketTime = millis();
+    }
+
+    if (logic.getCurrentState() == STATE_CURTAIN_MOVING)
+    {
+        if (millis() - curtainOverrideStartTime > 5000)
+        {
+            logic.forceNeutral();
+            Serial.println(">> [IOT] Curtain 5s window expired. Returned to Idle.");
+        }
     }
 
     // --- ASYNC COMMAND PROCESSING ---
@@ -297,101 +299,132 @@ void loop()
     {
         uint8_t blinks = pendingBlinks;
         pendingBlinks = 0;
+        lastActionTime = millis();
+        Serial.printf("\n>> [ALGORITHM DETECTED] %d Action(s) Registered!\n", blinks);
 
-        // 1. MAIN MENU
-        if (currentState == STATE_IDLE_MENU)
+        // --- OVERRIDES ---
+        if (blinks == 88)
         {
-            if (blinks == 1)
-            {
-                Serial.println(">> Mode: WHEELCHAIR");
-                buzzer.playTone(150, 1);
-                currentState = STATE_WHEELCHAIR_IDLE;
-            }
-            else if (blinks == 2)
-            {
-                Serial.println(">> Mode: IOT");
-                buzzer.playTone(150, 2);
-                currentState = STATE_IOT_MODE;
-            }
+            Serial.println(">> WC: JAW BRAKE TRIGGERED");
+            udp.sendCommand(ipWC, portWC, "S");
+            buzzer.beepBrake();
+            logic.forceNeutral();
+            return;
+        }
+        if (blinks == 99)
+        {
+            Serial.println(">> IOT: CURTAIN INSTANT STOP");
+            udp.sendCommand(activeCurtainIP, portCurtain, "S"); // Uses the saved IP
+            buzzer.beepBlinks(1);
+            logic.forceNeutral();
+            return;
         }
 
-        // 2. WHEELCHAIR IDLE
-        else if (currentState == STATE_WHEELCHAIR_IDLE)
-        {
-            if (blinks == 1)
-            {
-                Serial.println(">> WC: FORWARD");
-                chairCmd.action = 1;
-                // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-                buzzer.playTone(150, 1);
-                currentState = STATE_WHEELCHAIR_MOVING;
-            }
-            else if (blinks == 2)
-            {
-                Serial.println(">> WC: LEFT");
-                chairCmd.action = 2;
-                // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-                buzzer.playTone(150, 2);
-                currentState = STATE_WHEELCHAIR_MOVING;
-            }
-            else if (blinks == 3)
-            {
-                Serial.println(">> WC: RIGHT");
-                chairCmd.action = 3;
-                // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-                buzzer.playTone(150, 3);
-                currentState = STATE_WHEELCHAIR_MOVING;
-            }
-        }
+        CommandAction triggeredCmd = logic.processBlinks(blinks);
 
-        // 3. WHEELCHAIR MOVING (JAW OVERRIDE)
-        else if (currentState == STATE_WHEELCHAIR_MOVING)
+        switch (triggeredCmd)
         {
-            if (blinks == 88)
-            { // Jaw Clench Detected
-                Serial.println(">> WC: EMERGENCY JAW BRAKE");
-                chairCmd.action = 0;
-                // espNow.send((uint8_t*)&chairCmd, sizeof(chairCmd));
-                buzzer.playTone(150, 1);
-                currentState = STATE_WHEELCHAIR_IDLE;
-            }
-        }
+        case CMD_OPEN_MENU:
+            Serial.println(">> [MAIN MENU] 1=Wheelchair, 2=IoT");
+            buzzer.beepMenuOpen();
+            break;
 
-        // 4. IOT MODE
-        else if (currentState == STATE_IOT_MODE && isWiFiReady)
-        {
-            if (blinks == 1)
+        case CMD_SELECT_WHEELCHAIR:
+            Serial.println(">> [MODE] Wheelchair Active.");
+            buzzer.beepBlinks(1);
+            break;
+
+        case CMD_SELECT_IOT:
+            Serial.println(">> [MODE] IoT Active.");
+            buzzer.beepBlinks(2);
+            break;
+
+        // --- WHEELCHAIR COMMANDS ---
+        case CMD_WC_FWD:
+            Serial.println(">> WC: FORWARD");
+            udp.sendCommand(ipWC, portWC, "F");
+            buzzer.beepBlinks(1);
+            break;
+
+        case CMD_WC_LEFT:
+            Serial.println(">> WC: LEFT");
+            udp.sendCommand(ipWC, portWC, "L");
+            buzzer.beepBlinks(2);
+            break;
+
+        case CMD_WC_RIGHT:
+            Serial.println(">> WC: RIGHT");
+            udp.sendCommand(ipWC, portWC, "R");
+            buzzer.beepBlinks(3);
+            break;
+
+        // --- IOT PROXIMITY DISCOVERY & COMMANDS ---
+        case CMD_IOT_LAMP: // 1 Blink = 10A Lamp (DeviceType 3)
+            Serial.println(">> IOT: Searching for closest 10A Lamp...");
+            espNow.broadcastDiscoveryPing(3);
+            delay(100); // Give ESP-NOW 100ms to catch the Pong
+
+            if (espNow.hasDiscoveredDevice())
             {
-                state10A = !state10A;
-                String payload = state10A ? "{\"state10A\":\"ON\"}" : "{\"state10A\":\"OFF\"}";
-                // udp.broadcastTo(payload.c_str(), UDP_BROADCAST_PORT);
-                Serial.println(">> IOT: Toggled 10A Switch");
-                buzzer.playTone(150, 1);
+                state10A_isOpen = !state10A_isOpen;
+                String payload = state10A_isOpen ? "O10" : "C10";
+                udp.sendCommand(espNow.getDiscoveredIP(), port10A, payload);
+                Serial.printf(">> IOT: Sent %s to %s\n", payload.c_str(), espNow.getDiscoveredIP().toString().c_str());
+                buzzer.beepBlinks(1);
             }
-            else if (blinks == 2)
+            else
             {
-                curtainOpen = !curtainOpen;
-                String payload = curtainOpen ? "{\"closePercentage\": 0.0}" : "{\"closePercentage\": 100.0}";
-                // udp.broadcastTo(payload.c_str(), UDP_BROADCAST_PORT);
-                Serial.println(">> IOT: Toggled Curtain. 5s Stop Window Active.");
-                buzzer.playTone(150, 2);
-                curtainOverrideActive = true;
+                Serial.println(">> [!] No Lamp found nearby.");
+                buzzer.beepFailure();
+            }
+            break;
+
+        case CMD_IOT_CURTAIN: // 2 Blinks = Curtain (DeviceType 1)
+            Serial.println(">> IOT: Searching for closest Curtain...");
+            espNow.broadcastDiscoveryPing(1);
+            delay(100);
+
+            if (espNow.hasDiscoveredDevice())
+            {
+                activeCurtainIP = espNow.getDiscoveredIP(); // Save IP for emergency stop
+                curtain_isOpen = !curtain_isOpen;
+                String payload = curtain_isOpen ? "O" : "C";
+                udp.sendCommand(activeCurtainIP, portCurtain, payload);
+                Serial.printf(">> IOT: Sent %s to %s. 5s window active.\n", payload.c_str(), activeCurtainIP.toString().c_str());
                 curtainOverrideStartTime = millis();
+                buzzer.beepBlinks(2);
             }
-            else if (blinks == 3)
+            else
             {
-                state30A = !state30A;
-                String payload = state30A ? "{\"state30A\":\"ON\"}" : "{\"state30A\":\"OFF\"}";
-                // udp.broadcastTo(payload.c_str(), UDP_BROADCAST_PORT);
-                Serial.println(">> IOT: Toggled 30A Switch");
-                buzzer.playTone(150, 3);
+                Serial.println(">> [!] No Curtain found nearby.");
+                buzzer.beepFailure();
+                logic.forceNeutral(); // Cancel the curtain moving state if no curtain exists
             }
-            else if (blinks == 99)
-            { // Curtain Emergency Stop
-                // udp.broadcastTo("{\"curtain\":\"STOP\"}", UDP_BROADCAST_PORT);
-                Serial.println(">> IOT: CURTAIN EMERGENCY STOP");
-                buzzer.playTone(150, 1);
+            break;
+
+        case CMD_IOT_FAN: // 3 Blinks = 30A AC/Fan (DeviceType 2)
+            Serial.println(">> IOT: Searching for closest 30A AC...");
+            espNow.broadcastDiscoveryPing(2);
+            delay(100);
+
+            if (espNow.hasDiscoveredDevice())
+            {
+                state30A_isOpen = !state30A_isOpen;
+                String payload = state30A_isOpen ? "O30" : "C30";
+                udp.sendCommand(espNow.getDiscoveredIP(), port30A, payload);
+                Serial.printf(">> IOT: Sent %s to %s\n", payload.c_str(), espNow.getDiscoveredIP().toString().c_str());
+                buzzer.beepBlinks(3);
             }
+            else
+            {
+                Serial.println(">> [!] No AC found nearby.");
+                buzzer.beepFailure();
+            }
+            break;
+
+        case CMD_NONE:
+        default:
+            break;
         }
     }
 }

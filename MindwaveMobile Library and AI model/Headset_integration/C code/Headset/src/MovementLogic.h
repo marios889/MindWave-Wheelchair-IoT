@@ -4,7 +4,8 @@
 #include <Arduino.h>
 
 // Every state required by the logic and the compiler
-enum SystemState {
+enum SystemState
+{
     STATE_LOCKED,
     STATE_IDLE,
     STATE_MAIN_MENU,
@@ -15,7 +16,8 @@ enum SystemState {
 };
 
 // Every command required by main.cpp
-enum CommandAction {
+enum CommandAction
+{
     CMD_NONE,
     CMD_OPEN_MENU,
     CMD_SELECT_WHEELCHAIR,
@@ -30,17 +32,20 @@ enum CommandAction {
     CMD_SYSTEM_UNLOCKED
 };
 
-class MovementLogic {
+class MovementLogic
+{
 private:
     SystemState currentState;
 
 public:
     MovementLogic();
     SystemState getCurrentState();
-    
-    void lockSystem();
-    void forceNeutral(); 
 
+    void lockSystem();
+    void forceNeutral();
+    void forceWheelchair();
+    void forceIoT();
+    
     CommandAction processContinuous(uint8_t attention, uint8_t poorSignal);
     CommandAction processBlinks(uint8_t blinks);
 };
