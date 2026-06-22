@@ -24,7 +24,7 @@ const uint8_t WIFI_BTN_PIN = D3;
 // TARGET PORTS & STATIC IPs
 // ==========================================
 const int port10A = 8000;
-const int port30A = 8001;
+const int port30A = 8000;
 const int portCurtain = 8007;
 
 // Wheelchair is assumed to be the one static IP we always know
@@ -69,6 +69,7 @@ bool isSignalBad = false;
 uint32_t curtainOverrideStartTime = 0;
 uint32_t lastActionTime = 0;
 const uint32_t GLOBAL_TIMEOUT_MS = 8000;
+
 // ==========================================
 // WIFI BUTTON LOGIC
 // ==========================================
@@ -294,12 +295,25 @@ void loop()
         }
     }
 
+    // 5. Safety Timer: 8-Second Inactivity Timeout
+    SystemState currentSysState = logic.getCurrentState();
+    if (currentSysState != STATE_IDLE && currentSysState != STATE_LOCKED)
+    {
+        if (millis() - lastActionTime > GLOBAL_TIMEOUT_MS)
+        {
+            Serial.println("\n>> [TIMEOUT] 8 seconds of inactivity. Returning to IDLE.");
+            buzzer.beepFailure();
+            logic.forceNeutral();
+            lastActionTime = millis();
+        }
+    }
+
     // --- ASYNC COMMAND PROCESSING ---
     if (pendingBlinks > 0)
     {
         uint8_t blinks = pendingBlinks;
         pendingBlinks = 0;
-        lastActionTime = millis();
+        lastActionTime = millis(); // Resets the 8s timer on ANY action
         Serial.printf("\n>> [ALGORITHM DETECTED] %d Action(s) Registered!\n", blinks);
 
         // --- OVERRIDES ---
@@ -308,7 +322,7 @@ void loop()
             Serial.println(">> WC: JAW BRAKE TRIGGERED");
             udp.sendCommand(ipWC, portWC, "S");
             buzzer.beepBrake();
-            logic.forceNeutral();
+            logic.forceWheelchair(); // Reverts 1 step back to Wheelchair mode
             return;
         }
         if (blinks == 99)
@@ -398,7 +412,7 @@ void loop()
             {
                 Serial.println(">> [!] No Curtain found nearby.");
                 buzzer.beepFailure();
-                logic.forceNeutral(); // Cancel the curtain moving state if no curtain exists
+                logic.forceIoT(); // Reverts 1 step back to IoT mode
             }
             break;
 
