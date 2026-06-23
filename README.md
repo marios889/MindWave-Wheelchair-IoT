@@ -3,7 +3,6 @@
 ![Project Status](https://img.shields.io/badge/Status-Completed-success)
 ![Platform](https://img.shields.io/badge/Platform-ESP32%20%7C%20Wemos%20D1-blue)
 ![Network](https://img.shields.io/badge/Network-UDP%20%7C%20ESP--NOW-orange)
-![License](https://img.shields.io/badge/License-MIT-green)
 
 **EmbedInt** is a commercially scalable, decentralized assistive ecosystem designed to restore mobility and environmental autonomy to elderly users and individuals with severe motor disabilities. 
 
