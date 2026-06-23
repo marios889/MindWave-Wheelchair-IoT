@@ -5,6 +5,56 @@
 This Flutter application serves as a centralized control platform for both a Smart Wheelchair System and a Smart Home Automation System. The application enables real-time monitoring and control of multiple ESP-based devices through UDP communication while maintaining responsive user interaction using reactive state management.
 
 ---
+## Application User Interface
+
+The Flutter application provides a centralized interface for controlling both the Smart Wheelchair and Smart Home devices.
+
+### Main Screens
+
+#### Wheelchair Control Screen
+
+* Real-time wheelchair navigation controls.
+* Forward, Backward, Left, Right movement commands.
+* Speed increase and decrease controls.
+* Live speed feedback from the wheelchair controller.
+
+#### Smart Home Dashboard
+
+* Room-based organization of connected devices.
+* Quick access to device status and controls.
+* Real-time online/offline indicators.
+
+#### Device Management Screen
+
+* Add, edit, and remove devices.
+* Configure device name, IP address, port, and type.
+* Support for multiple smart device categories.
+
+### User Interface Features
+
+* Responsive Flutter-based design.
+* Real-time state synchronization.
+* Reactive updates using ValueNotifier.
+* Swipe-to-refresh device status updates.
+* Automatic visual feedback for device state changes.
+* Online/offline status indicators.
+
+### Screenshots
+
+## Application User Interface
+
+### Wheelchair Control Screen
+
+![Wheelchair Control](screenshots/wheelchair.jpeg)
+
+### Smart Home Dashboard
+
+![Dashboard](screenshots/rooms.jpeg)
+
+
+### Device Cards
+
+![Device Cards](screenshots/device_cards.jpeg)
 
 ## Features
 
