@@ -43,18 +43,24 @@ The Flutter application provides a centralized interface for controlling both th
 
 ## Application User Interface
 
-### Wheelchair Control Screen
+<div style="display: flex; gap: 20px;">
 
-![Wheelchair Control](screenshots/wheelchair.jpeg)
+  <div>
+    <h3>Wheelchair Control Screen</h3>
+    <img src="screenshots/wheelchair.jpeg" alt="Wheelchair Control" width="300">
+  </div>
 
-### Smart Home Dashboard
+  <div>
+    <h3>Smart Home Dashboard</h3>
+    <img src="screenshots/rooms.jpeg" alt="Dashboard" width="300">
+  </div>
 
-![Dashboard](screenshots/rooms.jpeg)
+  <div>
+    <h3>Device Cards</h3>
+    <img src="screenshots/device_cards.jpeg" alt="Device Cards" width="300">
+  </div>
 
-
-### Device Cards
-
-![Device Cards](screenshots/device_cards.jpeg)
+</div>
 
 ## Features
 
