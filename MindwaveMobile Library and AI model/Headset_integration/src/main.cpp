@@ -28,7 +28,7 @@ const int port30A = 8000;
 const int portCurtain = 8007;
 
 // Wheelchair is assumed to be the one static IP we always know
-IPAddress ipWC(192, 168, 1, 80);
+IPAddress ipWC;
 const int portWC = 8008;
 
 // Stored IPs for overrides
@@ -131,7 +131,7 @@ void handleRawData(int16_t rawValue)
     // 2. CURTAIN 5-SECOND OVERRIDE
     if (currentState == STATE_CURTAIN_MOVING)
     {
-        if (millis() - curtainOverrideStartTime <= 5000)
+        if (millis() - curtainOverrideStartTime <= 20000)
         {
             if (rawValue > 850)
             {
@@ -211,9 +211,16 @@ void loop()
     if (WiFi.status() == WL_CONNECTED && !isWiFiReady)
     {
         isWiFiReady = true;
+
+        // --- DYNAMIC IP CALCULATION ---
+        IPAddress gw = WiFi.gatewayIP();
+        ipWC = IPAddress(gw[0], gw[1], gw[2], 80); // Wheelchair fixed ending (.80)
+
         Serial.println("\n==========================================");
-        Serial.print(">> [NETWORK] IP Address: ");
+        Serial.print(">> [NETWORK] Headset IP: ");
         Serial.println(WiFi.localIP());
+        Serial.print(">> [NETWORK] Target Wheelchair IP: ");
+        Serial.println(ipWC);
         Serial.println("==========================================\n");
 
         // Start UDP and the ESP-NOW Discovery Engine
@@ -288,16 +295,16 @@ void loop()
 
     if (logic.getCurrentState() == STATE_CURTAIN_MOVING)
     {
-        if (millis() - curtainOverrideStartTime > 5000)
+        if (millis() - curtainOverrideStartTime > 20000)
         {
-            logic.forceNeutral();
+            logic.forceIoT();
             Serial.println(">> [IOT] Curtain 5s window expired. Returned to Idle.");
         }
     }
 
     // 5. Safety Timer: 8-Second Inactivity Timeout
     SystemState currentSysState = logic.getCurrentState();
-    if (currentSysState != STATE_IDLE && currentSysState != STATE_LOCKED)
+    if (currentSysState != STATE_IDLE && currentSysState != STATE_LOCKED && currentSysState != STATE_CURTAIN_MOVING)
     {
         if (millis() - lastActionTime > GLOBAL_TIMEOUT_MS)
         {
@@ -330,7 +337,7 @@ void loop()
             Serial.println(">> IOT: CURTAIN INSTANT STOP");
             udp.sendCommand(activeCurtainIP, portCurtain, "S"); // Uses the saved IP
             buzzer.beepBlinks(1);
-            logic.forceNeutral();
+            logic.forceIoT();
             return;
         }
 
